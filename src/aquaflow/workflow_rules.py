@@ -15,7 +15,7 @@ from .lab.scheduling import Collector, Req, assign
 from .leak.localize import Signal, rank
 from .meters.balance import Meter, balance
 from .network.isolation import Pipe, isolated
-from .network.pressure import Node as PressureNode, classify as classify_pressure
+from .network.pressure import Node as PressureNode, assess_many as assess_pressure
 from .network.topology import Revision, at as topology_at
 from .outage.impact import Customer, summarize
 from .pumps.schedule import Hist, Pump, choose as choose_pumps
@@ -60,9 +60,44 @@ def evaluate(name: str, p: dict[str, Any]) -> dict[str, Any]:
         cut = isolated(set(p["nodes"]), ps, set(p["closed"]), set(p["sources"]))
         return {"decision": "isolate", "value": sorted(cut), "evidence": {"source_count": len(p["sources"])}}
     if name == "zone_pressure":
-        rows = [PressureNode(str(x["id"]), float(x["elevation_m"]), float(x["pressure_kpa"]) + (float(x["elevation_m"])*9.80665/10 if p.get("_head_correction") == "add" else 0.0)) for x in p["nodes"]]
-        result = classify_pressure(rows, float(p["low"]), float(p["high"]))
-        return {"decision": "intervene" if result["low"] or result["high"] else "monitor", "value": result, "evidence": {"nodes": len(rows)}}
+        # Pass raw telemetry through; the elevation-head correction is applied
+        # exactly once, inside the domain classifier, so it cannot be lost.
+        rows = [PressureNode(str(x["id"]), float(x["elevation_m"]), float(x["pressure_kpa"]), bool(x.get("enabled", True))) for x in p["nodes"]]
+        readings = assess_pressure(rows, float(p["low"]), float(p["high"]))
+        result = {
+            "low": [r.node_id for r in readings if r.state == "low"],
+            "high": [r.node_id for r in readings if r.state == "high"],
+            "normal": [r.node_id for r in readings if r.state == "normal"],
+            "disabled": [r.node_id for r in readings if r.state == "disabled"],
+        }
+        intervene = sorted(result["low"] + result["high"])
+        evidence_nodes = [
+            {
+                "id": r.node_id,
+                "state": r.state,
+                "pressure_kpa": r.pressure_kpa,
+                "elevation_m": r.elevation_m,
+                "elevation_head_kpa": r.elevation_head_kpa,
+                "corrected_kpa": r.corrected_kpa,
+                "low": r.low,
+                "high": r.high,
+                "enabled": r.enabled,
+            }
+            for r in readings
+        ]
+        return {
+            "decision": "intervene" if intervene else "monitor",
+            "value": result,
+            "intervene": intervene,
+            "monitor": sorted(result["normal"]),
+            "disabled": result["disabled"],
+            "evidence": {
+                "nodes": len(rows),
+                "low_limit": float(p["low"]),
+                "high_limit": float(p["high"]),
+                "readings": evidence_nodes,
+            },
+        }
     if name == "pump_dispatch":
         rows = [Pump(str(x["id"]), float(x["kw"]), float(x["flow"]), float(x["min_run"]), float(x["min_rest"])) for x in p["pumps"]]
         history = {str(k): Hist(bool(v["running"]), float(v["since_start"]), float(v["since_stop"])) for k, v in p["history"].items()}
