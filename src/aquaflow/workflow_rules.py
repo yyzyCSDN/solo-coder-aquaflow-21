@@ -15,7 +15,11 @@ from .lab.scheduling import Collector, Req, assign
 from .leak.localize import Signal, rank
 from .meters.balance import Meter, balance
 from .network.isolation import Pipe, isolated
-from .network.pressure import Node as PressureNode, classify as classify_pressure
+from .network.pressure import (
+    Node as PressureNode,
+    classify as classify_pressure,
+    evidence as pressure_evidence,
+)
 from .network.topology import Revision, at as topology_at
 from .outage.impact import Customer, summarize
 from .pumps.schedule import Hist, Pump, choose as choose_pumps
@@ -60,9 +64,36 @@ def evaluate(name: str, p: dict[str, Any]) -> dict[str, Any]:
         cut = isolated(set(p["nodes"]), ps, set(p["closed"]), set(p["sources"]))
         return {"decision": "isolate", "value": sorted(cut), "evidence": {"source_count": len(p["sources"])}}
     if name == "zone_pressure":
-        rows = [PressureNode(str(x["id"]), float(x["elevation_m"]), float(x["pressure_kpa"]) + (float(x["elevation_m"])*9.80665/10 if p.get("_head_correction") == "add" else 0.0)) for x in p["nodes"]]
-        result = classify_pressure(rows, float(p["low"]), float(p["high"]))
-        return {"decision": "intervene" if result["low"] or result["high"] else "monitor", "value": result, "evidence": {"nodes": len(rows)}}
+        rows = [
+            PressureNode(
+                str(x["id"]),
+                float(x["elevation_m"]),
+                float(x["pressure_kpa"]),
+                bool(x.get("enabled", True)),
+            )
+            for x in p["nodes"]
+        ]
+        low, high = float(p["low"]), float(p["high"])
+        result = classify_pressure(rows, low, high)
+        intervention = sorted(result["low"] + result["high"])
+        monitor = sorted(result["normal"])
+        disabled = sorted(result["disabled"])
+        detail = pressure_evidence(rows, low, high)
+        return {
+            "decision": "intervene" if intervention else "monitor",
+            "value": result,
+            "intervention_nodes": intervention,
+            "monitorable_nodes": monitor,
+            "disabled_nodes": disabled,
+            "evidence": {
+                "nodes": len(rows),
+                "low_limit_kpa": low,
+                "high_limit_kpa": high,
+                "head_correction": "add",
+                "kpa_per_metre_head": 9.80665,
+                "detail": detail,
+            },
+        }
     if name == "pump_dispatch":
         rows = [Pump(str(x["id"]), float(x["kw"]), float(x["flow"]), float(x["min_run"]), float(x["min_rest"])) for x in p["pumps"]]
         history = {str(k): Hist(bool(v["running"]), float(v["since_start"]), float(v["since_stop"])) for k, v in p["history"].items()}
